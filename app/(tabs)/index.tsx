@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { StyleSheet, useColorScheme, Pressable, Modal, FlatList, TextInput, ListRenderItem, Platform, Alert } from 'react-native';
+import { StyleSheet, useColorScheme, Pressable, Modal, FlatList, TextInput, ListRenderItem } from 'react-native';
 import { ThemedView } from '@/components/ThemedView';
 import { ThemedText } from '@/components/ThemedText';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,6 +23,11 @@ interface LanguageSelectorProps {
   onSelect: (language: string) => void;
   theme: Theme;
   currentValue: string;
+}
+
+interface AudioRecorderHook {
+  onRecordingStatusChange: (status: boolean) => void;
+  onRecordingComplete: (text: string) => void;
 }
 
 const LANGUAGES: LanguageMap = {
@@ -121,10 +126,8 @@ const HomeScreen: React.FC = () => {
   const colorScheme = useColorScheme();
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [translatedText, setTranslatedText] = useState<string>('');
-  const [languages, setLanguages] = useState({ sourceLanguage: 'english', targetLanguage: 'spanish' });
+  const [languages, setLanguages] = useState({ sourceLanguage: 'english', targetLanguage: 'hindi' });
   const [modalVisibility, setModalVisibility] = useState({ source: false, target: false });
-  const [isServerAvailable, setIsServerAvailable] = useState(false);
-  const [lastServerCheck, setLastServerCheck] = useState(Date.now());
 
   const theme: Theme = {
     background: colorScheme === 'dark' ? '#1A1A1A' : '#F5F9FF',
@@ -133,14 +136,8 @@ const HomeScreen: React.FC = () => {
     textSecondary: colorScheme === 'dark' ? '#AAAAAA' : '#666666',
     primary: '#4B9CFF',
   };
-  
-  // Use a more dynamic way to set the API URL, falling back to localhost if running on simulator
-  const API_URL = Platform.select({
-    web: 'http://localhost:3000', // Use localhost for web
-    ios: 'http://localhost:3000',
-    android: 'http://10.0.2.2:3000', // Special IP for Android emulator to access host machine
-    default: 'http://localhost:3000',
-  });
+  const API_URL = 'http://192.168.0.109:3000';
+
 
   const handleRecordingStatusChange = useCallback((status: boolean) => {
     setIsRecording(status);
@@ -153,8 +150,6 @@ const HomeScreen: React.FC = () => {
   const { toggleRecording } = useAudioRecorder({
     onRecordingStatusChange: handleRecordingStatusChange,
     onRecordingComplete: handleRecordingComplete,
-    serverUrl: API_URL,
-    targetLanguage: languages.targetLanguage,
   });
 
   const swapLanguages = () => {
@@ -167,124 +162,44 @@ const HomeScreen: React.FC = () => {
   const handleLanguageSelect = (language: string) => {
     setLanguages(prev => {
       const updatedLanguages = { ...prev, sourceLanguage: language };
-      if (isServerAvailable) {
-        updateLanguage(updatedLanguages.targetLanguage).catch(err => {
-          console.log('Could not update language on server:', err);
-        });
-      }
+      updateLanguage(updatedLanguages.targetLanguage); 
       return updatedLanguages;
     });
   };
   
   const updateLanguage = async (targetLanguage: string): Promise<void> => {
-    try {
-      const response = await fetch(`${API_URL}/language`, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ targetLanguage: LANGUAGES[targetLanguage] || targetLanguage }),
-      });
-    
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-    
-      return response.json();
-    } catch (error) {
-      console.log('Error updating language:', error);
-      // Don't throw the error - handle it gracefully
-      return Promise.resolve();
+    const response = await fetch(`${API_URL}/language`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ targetLanguage }),
+    });
+  
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
+  
+    return response.json();
   };
   
-  const checkServerAvailability = async () => {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
-      
-      const response = await fetch(`${API_URL}/language`, {
-        method: 'GET',
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        setIsServerAvailable(true);
-        console.log('Server is available');
-      } else {
-        setIsServerAvailable(false);
-        console.log('Server returned an error');
-      }
-    } catch (error) {
-      setIsServerAvailable(false);
-      console.log('Server is not available:', error);
-    } finally {
-      setLastServerCheck(Date.now());
-    }
-  };
   
   useEffect(() => {
-    // Check server availability on component mount
-    checkServerAvailability();
-    
-    // Check server every 10 seconds
-    const intervalId = setInterval(checkServerAvailability, 10000);
-    
-    return () => clearInterval(intervalId);
-  }, []);
-  
-  useEffect(() => {
-    if (languages.sourceLanguage && languages.targetLanguage && isServerAvailable) {
-      updateLanguage(languages.targetLanguage).catch(err => {
-        console.log('Could not update language on server:', err);
-      });
+    if (languages.sourceLanguage && languages.targetLanguage) {
+      updateLanguage(languages.targetLanguage);
     }
-  }, [languages, isServerAvailable]);
+  }, [languages]);
+  
 
   const toggleModal = (type: 'source' | 'target') => {
     setModalVisibility(prev => ({ ...prev, [type]: !prev[type] }));
-  };
-  
-  const handleRecordPress = () => {
-    if (!isServerAvailable && Platform.OS !== 'web') {
-      // If server check is older than 3 seconds, check again first
-      if (Date.now() - lastServerCheck > 3000) {
-        checkServerAvailability().then(() => {
-          if (!isServerAvailable) {
-            Alert.alert(
-              "Server Not Available", 
-              "The translation server is not available. Make sure the server is running and try again.",
-              [{ text: "OK" }]
-            );
-          } else {
-            toggleRecording();
-          }
-        });
-      } else {
-        Alert.alert(
-          "Server Not Available", 
-          "The translation server is not available. Make sure the server is running and try again.",
-          [{ text: "OK" }]
-        );
-      }
-      return;
-    }
-    
-    toggleRecording();
   };
 
   return (
     <ThemedView style={[styles.container, { backgroundColor: theme.background }]}>
       <ThemedView style={styles.header}>
-        <ThemedText style={[styles.title, { color: theme.text }]}>Voice Translator</ThemedText>
-        {!isServerAvailable && (
-          <ThemedText style={[styles.offlineIndicator, { color: "#FF6B6B" }]}>
-            ● Offline
-          </ThemedText>
-        )}
+        <ThemedText style={[styles.title, { color: theme.text }]}>Voice translator</ThemedText>
       </ThemedView>
 
       <ThemedView style={styles.languageContainer}>
@@ -338,26 +253,19 @@ const HomeScreen: React.FC = () => {
           <ThemedText style={[styles.hintText, { color: theme.textSecondary }]}>
             {isRecording ? 'Recording... Tap to stop' : 'Tap the mic button to start'}
           </ThemedText>
-          {Platform.OS === 'web' && (
-            <ThemedText style={[styles.webWarning, { color: "#FF6B6B" }]}>
-              Note: Audio recording is not fully supported in the web version
-            </ThemedText>
-          )}
         </ThemedView>
       </ThemedView>
 
-      <Pressable onPress={handleRecordPress} style={styles.micButtonContainer}>
-        <ThemedView style={[
-          styles.micButtonGlow, 
-          isRecording && styles.recording,
-          !isServerAvailable && styles.disabled
-        ]}>
-          <ThemedView style={[styles.micButton, !isServerAvailable && { backgroundColor: "#AAAAAA" }]}>
+      <Pressable onPress={toggleRecording} style={styles.micButtonContainer}>
+        <ThemedView style={[styles.micButtonGlow, isRecording && styles.recording]}>
+          <ThemedView style={styles.micButton}>
             <Ionicons name="mic" size={32} color="#fff" />
           </ThemedView>
         </ThemedView>
       </Pressable>
+      
     </ThemedView>
+
   );
 };
 
@@ -376,11 +284,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '500',
     textAlign: 'center',
-  },
-  offlineIndicator: {
-    marginLeft: 10,
-    fontSize: 12,
-    fontWeight: 'bold',
   },
   languageContainer: {
     flexDirection: 'row',
@@ -428,7 +331,7 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
   messageControls: {
-    backgroundColor: 'transparent',
+    backgroundColor:'transperent',
     flexDirection: 'row',
     gap: 20,
     justifyContent: 'flex-end',
@@ -436,11 +339,6 @@ const styles = StyleSheet.create({
   hintText: {
     textAlign: 'center',
     fontSize: 16,
-  },
-  webWarning: {
-    textAlign: 'center',
-    fontSize: 12,
-    marginTop: 8,
   },
   micButtonContainer: {
     position: 'absolute',
@@ -470,9 +368,6 @@ const styles = StyleSheet.create({
   },
   recording: {
     backgroundColor: 'rgba(255, 0, 0, 0.2)',
-  },
-  disabled: {
-    backgroundColor: 'rgba(170, 170, 170, 0.2)',
   },
   modalContainer: {
     flex: 1,
@@ -519,3 +414,4 @@ const styles = StyleSheet.create({
 });
 
 export default HomeScreen;
+
