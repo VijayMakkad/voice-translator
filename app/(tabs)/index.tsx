@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { StyleSheet, useColorScheme, Pressable, Modal, FlatList, TextInput, ListRenderItem } from 'react-native';
+import { StyleSheet, useColorScheme, Pressable, Modal, FlatList, TextInput, ListRenderItem, Alert } from 'react-native';
 import { ThemedView } from '@/components/ThemedView';
 import { ThemedText } from '@/components/ThemedText';
 import { Ionicons } from '@expo/vector-icons';
@@ -25,11 +25,7 @@ interface LanguageSelectorProps {
   currentValue: string;
 }
 
-interface AudioRecorderHook {
-  onRecordingStatusChange: (status: boolean) => void;
-  onRecordingComplete: (text: string) => void;
-}
-
+// This matches the language dictionary in translate_audio.py
 const LANGUAGES: LanguageMap = {
   'afrikaans': 'af', 'albanian': 'sq', 'amharic': 'am', 'arabic': 'ar', 
   'armenian': 'hy', 'azerbaijani': 'az', 'basque': 'eu', 'belarusian': 'be', 
@@ -125,9 +121,11 @@ const LanguageSelector: React.FC<LanguageSelectorProps> = ({
 const HomeScreen: React.FC = () => {
   const colorScheme = useColorScheme();
   const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [translatedText, setTranslatedText] = useState<string>('');
   const [languages, setLanguages] = useState({ sourceLanguage: 'english', targetLanguage: 'hindi' });
   const [modalVisibility, setModalVisibility] = useState({ source: false, target: false });
+  const [serverStatus, setServerStatus] = useState<string | null>(null);
 
   const theme: Theme = {
     background: colorScheme === 'dark' ? '#1A1A1A' : '#F5F9FF',
@@ -136,11 +134,17 @@ const HomeScreen: React.FC = () => {
     textSecondary: colorScheme === 'dark' ? '#AAAAAA' : '#666666',
     primary: '#4B9CFF',
   };
-  const API_URL = 'http://192.168.0.109:3000';
-
+  
+  // Use your IP address here, or make it configurable
+  // You can get your IP address from the Metro output
+  const API_URL = 'http://172.20.10.4:3000';
 
   const handleRecordingStatusChange = useCallback((status: boolean) => {
     setIsRecording(status);
+  }, []);
+
+  const handleProcessingStatusChange = useCallback((status: boolean) => {
+    setIsProcessing(status);
   }, []);
 
   const handleRecordingComplete = useCallback((text: string) => {
@@ -150,6 +154,8 @@ const HomeScreen: React.FC = () => {
   const { toggleRecording } = useAudioRecorder({
     onRecordingStatusChange: handleRecordingStatusChange,
     onRecordingComplete: handleRecordingComplete,
+    onProcessingStatusChange: handleProcessingStatusChange,
+    serverUrl: API_URL
   });
 
   const swapLanguages = () => {
@@ -159,39 +165,89 @@ const HomeScreen: React.FC = () => {
     }));
   };
 
-  const handleLanguageSelect = (language: string) => {
+  const handleSourceLanguageSelect = (language: string) => {
+    setLanguages(prev => ({
+      ...prev,
+      sourceLanguage: language
+    }));
+  };
+  
+  const handleTargetLanguageSelect = (language: string) => {
     setLanguages(prev => {
-      const updatedLanguages = { ...prev, sourceLanguage: language };
+      const updatedLanguages = { ...prev, targetLanguage: language };
       updateLanguage(updatedLanguages.targetLanguage); 
       return updatedLanguages;
     });
   };
   
   const updateLanguage = async (targetLanguage: string): Promise<void> => {
-    const response = await fetch(`${API_URL}/language`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ targetLanguage }),
-    });
-  
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+    try {
+      const response = await fetch(`${API_URL}/language`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ targetLanguage }),
+      });
+    
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+    
+      const data = await response.json();
+      console.log('Language updated successfully:', data);
+    } catch (error) {
+      console.error('Failed to update language:', error);
+      Alert.alert('Error', 'Failed to update translation language.');
     }
-  
-    return response.json();
   };
   
+  const checkServerStatus = async () => {
+    try {
+      const response = await fetch(`${API_URL}/health`, { timeout: 5000 });
+      if (response.ok) {
+        const data = await response.json();
+        setServerStatus('connected');
+        console.log('Server status:', data);
+        
+        // Update local state with server's current language
+        if (data.currentLanguage) {
+          // Find the language name from the code
+          const languageName = Object.keys(LANGUAGES).find(
+            key => LANGUAGES[key] === data.currentLanguage
+          ) || data.currentLanguage;
+          
+          setLanguages(prev => ({
+            ...prev,
+            targetLanguage: languageName
+          }));
+        }
+      } else {
+        setServerStatus('error');
+      }
+    } catch (error) {
+      console.error('Server health check failed:', error);
+      setServerStatus('error');
+    }
+  };
   
   useEffect(() => {
-    if (languages.sourceLanguage && languages.targetLanguage) {
+    // Check server status on component mount
+    checkServerStatus();
+    
+    // Set up periodic health checks
+    const interval = setInterval(checkServerStatus, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
+  
+  useEffect(() => {
+    if (languages.targetLanguage) {
       updateLanguage(languages.targetLanguage);
     }
-  }, [languages]);
+  }, [languages.targetLanguage]);
   
-
   const toggleModal = (type: 'source' | 'target') => {
     setModalVisibility(prev => ({ ...prev, [type]: !prev[type] }));
   };
@@ -200,6 +256,14 @@ const HomeScreen: React.FC = () => {
     <ThemedView style={[styles.container, { backgroundColor: theme.background }]}>
       <ThemedView style={styles.header}>
         <ThemedText style={[styles.title, { color: theme.text }]}>Voice translator</ThemedText>
+        {serverStatus === 'error' && (
+          <ThemedView style={styles.serverError}>
+            <Ionicons name="alert-circle" size={16} color="#FF4B4B" />
+            <ThemedText style={{ color: '#FF4B4B', fontSize: 12, marginLeft: 4 }}>
+              Server offline
+            </ThemedText>
+          </ThemedView>
+        )}
       </ThemedView>
 
       <ThemedView style={styles.languageContainer}>
@@ -229,7 +293,7 @@ const HomeScreen: React.FC = () => {
       <LanguageSelector
         visible={modalVisibility.source}
         onClose={() => toggleModal('source')}
-        onSelect={handleLanguageSelect}
+        onSelect={handleSourceLanguageSelect}
         theme={theme}
         currentValue={languages.sourceLanguage}
       />
@@ -237,35 +301,47 @@ const HomeScreen: React.FC = () => {
       <LanguageSelector
         visible={modalVisibility.target}
         onClose={() => toggleModal('target')}
-        onSelect={language => setLanguages(prev => ({ ...prev, targetLanguage: language }))}
+        onSelect={handleTargetLanguageSelect}
         theme={theme}
         currentValue={languages.targetLanguage}
       />
 
       <ThemedView style={styles.messageContainer}>
         <ThemedView style={[styles.messageBox, { backgroundColor: theme.surface }]}>
-          <ThemedText style={[styles.messageText]}>
+          <ThemedText style={[styles.messageText, { color: theme.text }]}>
             {translatedText || 'Translated text will appear here'}
           </ThemedText>
         </ThemedView>
 
         <ThemedView style={[styles.messageBox, { backgroundColor: theme.surface }]}>
           <ThemedText style={[styles.hintText, { color: theme.textSecondary }]}>
-            {isRecording ? 'Recording... Tap to stop' : 'Tap the mic button to start'}
+            {isProcessing ? 'Processing...' : isRecording ? 'Recording... Tap to stop' : 'Tap the mic button to start'}
           </ThemedText>
         </ThemedView>
       </ThemedView>
 
-      <Pressable onPress={toggleRecording} style={styles.micButtonContainer}>
-        <ThemedView style={[styles.micButtonGlow, isRecording && styles.recording]}>
-          <ThemedView style={styles.micButton}>
-            <Ionicons name="mic" size={32} color="#fff" />
+      <Pressable 
+        onPress={serverStatus === 'error' ? () => Alert.alert('Server Offline', 'Please check your server connection.') : toggleRecording} 
+        style={[styles.micButtonContainer, serverStatus === 'error' && styles.disabled]}
+        disabled={serverStatus === 'error'}
+      >
+        <ThemedView style={[
+          styles.micButtonGlow, 
+          isRecording && styles.recording,
+          isProcessing && styles.processing,
+          serverStatus === 'error' && styles.offline
+        ]}>
+          <ThemedView style={[styles.micButton, serverStatus === 'error' && styles.offlineButton]}>
+            <Ionicons 
+              name={isProcessing ? "ellipsis-horizontal" : "mic"} 
+              size={32} 
+              color="#fff" 
+            />
           </ThemedView>
         </ThemedView>
       </Pressable>
       
     </ThemedView>
-
   );
 };
 
@@ -279,6 +355,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 16,
     paddingTop: 68,
+  },
+  serverError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    position: 'absolute',
+    right: 16,
+    top: 68,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 75, 75, 0.1)',
   },
   title: {
     fontSize: 20,
@@ -329,6 +416,7 @@ const styles = StyleSheet.create({
   messageText: {
     fontSize: 16,
     lineHeight: 24,
+
   },
   messageControls: {
     backgroundColor:'transperent',
@@ -368,6 +456,18 @@ const styles = StyleSheet.create({
   },
   recording: {
     backgroundColor: 'rgba(255, 0, 0, 0.2)',
+  },
+  processing: {
+    backgroundColor: 'rgba(255, 180, 0, 0.2)',
+  },
+  offline: {
+    backgroundColor: 'rgba(150, 150, 150, 0.2)',
+  },
+  offlineButton: {
+    backgroundColor: '#888888',
+  },
+  disabled: {
+    opacity: 0.7,
   },
   modalContainer: {
     flex: 1,
@@ -414,4 +514,3 @@ const styles = StyleSheet.create({
 });
 
 export default HomeScreen;
-
